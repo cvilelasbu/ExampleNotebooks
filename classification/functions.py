@@ -37,26 +37,41 @@ def forward(blob,train=True):
        Returns: a dictionary of predicted labels, softmax, loss, and accuracy
     """
     with torch.set_grad_enabled(train):
-        # Prediction
+        # Prediction        
         data = torch.as_tensor(blob.data).cuda()#[torch.as_tensor(d).cuda() for d in blob.data]
         data = data.permute(0,3,1,2)
         prediction = blob.net(data)
+             
         # Training
         loss,acc=-1,-1
-        if blob.label is not None:
-            label = torch.as_tensor(blob.label).type(torch.LongTensor).cuda()#[torch.as_tensor(l).cuda() for l in blob.label]
-            label.requires_grad = False
-            loss = blob.criterion(prediction,label)
+        lossE, lossPID = -1, -1
+        if blob.labelE is not None:
+            labelE = torch.as_tensor(blob.labelE).type(torch.FloatTensor).cuda()#[torch.as_tensor(l).cuda() for l in blob.label]
+            labelE.requires_grad = False
+            labelPID = torch.as_tensor(blob.labelPID).type(torch.LongTensor).cuda()#[torch.as_tensor(l).cuda() for l in blob.label]
+            labelPID.requires_grad = False
+
+            lossE = blob.alpha*blob.criterionE(prediction[:,-1],labelE)
+            lossPID = blob.criterionPID(prediction[:,0:3],labelPID)
+            
+            loss = lossE + lossPID
+            
         blob.loss = loss
+        blob.lossE = lossE
+        blob.lossPID = lossPID
         
-        softmax    = blob.softmax(prediction).cpu().detach().numpy()
-        prediction = torch.argmax(prediction,dim=-1)
-        accuracy   = (prediction == label).sum().item() / float(prediction.nelement())
+        #softmax    = blob.softmax(prediction).cpu().detach().numpy()
+        pred_out = [[],[]]
+        pred_out[0].append(torch.argmax(prediction[:,0:3],dim=-1).cpu().detach().numpy())
+        accuracy   = (torch.argmax(prediction[:,0:3],dim=-1) == labelPID).sum().item() / float(len(prediction[:,0:3]))
+        pred_out[1].append(prediction[:,-1].cpu().detach().numpy())
         prediction = prediction.cpu().detach().numpy()
         
-        return {'prediction' : prediction,
-                'softmax'    : softmax,
+        return {'prediction' : pred_out,
+                'softmax'    : -999,
                 'loss'       : loss.cpu().detach().item(),
+                'lossE'      : lossE.cpu().detach().item(),
+                'lossPID'    : lossPID.cpu().detach().item(),
                 'accuracy'   : accuracy}
 
 def backward(blob):
@@ -92,7 +107,18 @@ def train_loop(blob,train_epoch=2.,store_iterations=500,store_prefix='snapshot')
         # Loop over data samples and into the network forward function
         for i,data in enumerate(train_loader):
             # Data and label
-            blob.data,blob.label = data[0:2]
+            blob.data,blob.labelPID,blob.labelE, blob.dirs = data[0], data[1], data[2], data[3]
+            blob.labelE = [np.sum(thisE) for thisE in blob.labelE ]
+            eMask = blob.labelPID == 1
+            muMask = blob.labelPID == 2
+            
+            for i, masks in enumerate(zip(eMask,muMask)) :
+                if masks[0] :
+                    blob.labelE[i] -= 0.511 + 0.77
+                elif masks[1] :
+                    blob.labelE[i] -= 105.7 + 160.3
+    
+            
             # Call forward: make a prediction & measure the average error
             res = forward(blob,True)
             # Call backward: backpropagate error and update weights
@@ -110,14 +136,25 @@ def train_loop(blob,train_epoch=2.,store_iterations=500,store_prefix='snapshot')
                 blob.train_log.write()
             # once in a while, report
             if blob.iteration==1 or blob.iteration%10 == 0:
-                message = '... Iteration %d ... Epoch %1.2f ... Loss %1.3f ... Accuracy %1.3f' % (blob.iteration,epoch,res['loss'],res['accuracy'])
+                message = '... Iteration %d ... Epoch %1.2f ... Loss %1.3f ... LossE %1.3f ... LossPID %1.3f Accuracy %1.3f' % (blob.iteration,epoch,res['loss'],res['lossE'], res['lossPID'], res['accuracy'])
                 progress.update(progress_bar((i+1),len(train_loader),message))
             # more rarely, run validation
             if test_loader is not None and blob.iteration%100 == 0:
                 with torch.no_grad():
                     blob.net.eval()
                     test_data = next(iter(test_loader))
-                    blob.data,blob.label = test_data[0:2]
+                    blob.data,blob.labelPID,blob.labelE, blob.dirs = data[0], data[1], data[2], data[3]
+                    blob.labelE = [np.sum(thisE) for thisE in blob.labelE ]
+                    eMask = blob.labelPID == 1
+                    muMask = blob.labelPID == 2
+                    for i, masks in enumerate(zip(eMask,muMask)) :
+                        if masks[0] :
+                            blob.labelE[i] -= 0.511 + 0.77
+                        elif masks[1] :
+                            blob.labelE[i] -= 105.7 + 160.3
+
+                    
+#                    blob.data,blob.label = test_data[0:2]
                     res = forward(blob,False)
                     if test_logger is not None:
                         blob.test_log.record(['iteration','epoch','accuracy','loss'],[blob.iteration,epoch,res['accuracy'],res['loss']])
@@ -190,19 +227,38 @@ def inference(blob,data_loader):
           data_loader ... DataLoader instance for inference
     Return: accuracy (per-batch), label (per sample), and prediction (per-sample)
     """
-    label,prediction,accuracy=[],[],[]
+    labelPID, labelE ,predictionPID, predictionE,accuracy= [],[],[],[],[]
     # set the network to test (non-train) mode
     blob.net.eval()
     # create the result holder
-    index,label,prediction = [],[],[]
+    index,labelPID, labelE,predictionPID, predictionE, dirs = [],[],[],[],[], []
     for data in data_loader:
-        blob.data, blob.label = data[0:2]
+        blob.data,blob.labelPID,blob.labelE, blob.dirs = data[0], data[1], data[2], data[3]
+        blob.labelE = [np.sum(thisE) for thisE in blob.labelE ]
+        eMask = blob.labelPID == 1
+        muMask = blob.labelPID == 2
+            
+            
+        for i, masks in enumerate(zip(eMask,muMask)) :
+            if masks[0] :
+                blob.labelE[i] -= 0.511 + 0.77
+            elif masks[1] :
+                blob.labelE[i] -= 105.7 + 160.3
+        
         res = forward(blob,True)
         accuracy.append(res['accuracy'])
-        prediction.append(res['prediction'])
-        label.append(blob.label)
+        predictionPID.append(res['prediction'][0][0])
+        predictionE.append(res['prediction'][1][0])
+        labelE.append(blob.labelE)
+        labelPID.append(blob.labelPID)
+        dirs.append(blob.dirs)
+        
     accuracy   = np.array(accuracy,dtype=np.float32)
-    label      = np.hstack(label)
-    prediction = np.hstack(prediction)        
-    return accuracy, label, prediction
+    labelE      = np.hstack(labelE)
+    labelPID      = np.hstack(labelPID)
+    predictionPID = np.hstack(predictionPID)  
+    predictionE = np.hstack(predictionE)  
+    dirs = np.hstack(dirs)
+    
+    return accuracy, labelPID, predictionPID,labelE, predictionE,dirs
 

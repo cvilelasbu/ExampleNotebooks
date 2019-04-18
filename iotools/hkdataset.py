@@ -46,7 +46,8 @@ class NPZDataset(Dataset):
         # Retrieve event index in this file that corresponds to overall index=idx
         i = self._event_index[idx]
         # Retrieve data & label
-        label = f['labels'][i]
+        labelPID = f['labels'][i]
+        labelE = f['energies']
         data  = f['event_data'][i]
         # Apply transformation function if necessary
         if self._transform is not None:

@@ -41,7 +41,8 @@ def plot_confusion_matrix(label,prediction,class_names):
                     ha="center", va="center", fontsize=16,
                     color="white" if mat[i,j] > (0.5*mat.max()) else "black")
     fig.tight_layout()
-    plt.show()
+    return fig
+#    plt.show()
 
 # Compute moving average
 def moving_average(a, n=3) :
